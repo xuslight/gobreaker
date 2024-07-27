@@ -14,8 +14,11 @@ type State int
 
 // These constants are states of CircuitBreaker.
 const (
+	// 闭合状态，请求正常通过
 	StateClosed State = iota
+	// 半开状态，请求少量通过并测试服务是否可以正常请求
 	StateHalfOpen
+	// 打开状态，请求直接失败返回
 	StateOpen
 )
 
@@ -44,12 +47,19 @@ func (s State) String() string {
 // CircuitBreaker clears the internal Counts either
 // on the change of the state or at the closed-state intervals.
 // Counts ignores the results of the requests sent before clearing.
+// Counts 记录了请求数量、以及请求的成功与否
+// CircuitBreaker 清除 Counts 在状态变更或达到 closed-state 的 intervals
 type Counts struct {
-	Requests             uint32
-	TotalSuccesses       uint32
-	TotalFailures        uint32
+	// 请求数量
+	Requests uint32
+	// 成功次数
+	TotalSuccesses uint32
+	// 失败次数
+	TotalFailures uint32
+	// 连续成功次数
 	ConsecutiveSuccesses uint32
-	ConsecutiveFailures  uint32
+	// 连续失败次数
+	ConsecutiveFailures uint32
 }
 
 func (c *Counts) onRequest() {
@@ -104,13 +114,20 @@ func (c *Counts) clear() {
 // Otherwise the error is counted as a failure.
 // If IsSuccessful is nil, default IsSuccessful is used, which returns false for all non-nil errors.
 type Settings struct {
-	Name          string
-	MaxRequests   uint32
-	Interval      time.Duration
-	Timeout       time.Duration
-	ReadyToTrip   func(counts Counts) bool
+	// 名称
+	Name string
+	// 在半开状态下可通过的请求数量
+	MaxRequests uint32
+	// 关闭状态下，Counts 清零的时间间隔
+	Interval time.Duration
+	// 打开状态持续的时间，到时间后变为 half-open 状态
+	Timeout time.Duration
+	// 是否要打开断路器，当请求失败后会进行判断，如果是 true 就打开断路器，否则不打开
+	ReadyToTrip func(counts Counts) bool
+	// 状态变化的回调
 	OnStateChange func(name string, from State, to State)
-	IsSuccessful  func(err error) bool
+	// 请求是否成功的判断函数
+	IsSuccessful func(err error) bool
 }
 
 // CircuitBreaker is a state machine to prevent sending requests that are likely to fail.
@@ -189,6 +206,7 @@ func NewTwoStepCircuitBreaker(st Settings) *TwoStepCircuitBreaker {
 const defaultInterval = time.Duration(0) * time.Second
 const defaultTimeout = time.Duration(60) * time.Second
 
+// 默认的 readyToTrip 是连续出现 5 次错误
 func defaultReadyToTrip(counts Counts) bool {
 	return counts.ConsecutiveFailures > 5
 }
@@ -226,6 +244,7 @@ func (cb *CircuitBreaker) Counts() Counts {
 // If a panic occurs in the request, the CircuitBreaker handles it as an error
 // and causes the same panic again.
 func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{}, error) {
+	// 在请求之前的检查，检查 now 应该是在什么状态，状态为 Open 就直接返回错误
 	generation, err := cb.beforeRequest()
 	if err != nil {
 		return nil, err
@@ -296,6 +315,7 @@ func (cb *CircuitBreaker) afterRequest(before uint64, success bool) {
 
 	now := time.Now()
 	state, generation := cb.currentState(now)
+	// 不为 before 就不管啦，因为状态变更了，这次请求就不记录到 Counts 里面去了
 	if generation != before {
 		return
 	}
@@ -313,6 +333,7 @@ func (cb *CircuitBreaker) onSuccess(state State, now time.Time) {
 		cb.counts.onSuccess()
 	case StateHalfOpen:
 		cb.counts.onSuccess()
+		// 全部都是成功，那还说啥呢
 		if cb.counts.ConsecutiveSuccesses >= cb.maxRequests {
 			cb.setState(StateClosed, now)
 		}
@@ -323,6 +344,7 @@ func (cb *CircuitBreaker) onFailure(state State, now time.Time) {
 	switch state {
 	case StateClosed:
 		cb.counts.onFailure()
+		// 检查是否要转变成 Open
 		if cb.readyToTrip(cb.counts) {
 			cb.setState(StateOpen, now)
 		}
@@ -335,10 +357,13 @@ func (cb *CircuitBreaker) currentState(now time.Time) (State, uint64) {
 	switch cb.state {
 	case StateClosed:
 		if !cb.expiry.IsZero() && cb.expiry.Before(now) {
+			// 主要是清空一次 counts，并且设置新的 expiry
 			cb.toNewGeneration(now)
 		}
 	case StateOpen:
+		// 进行状态的变更
 		if cb.expiry.Before(now) {
+			// 变更完状态后也要重新设置一次 expiry 定时器
 			cb.setState(StateHalfOpen, now)
 		}
 	}
@@ -355,6 +380,7 @@ func (cb *CircuitBreaker) setState(state State, now time.Time) {
 
 	cb.toNewGeneration(now)
 
+	// 回调
 	if cb.onStateChange != nil {
 		cb.onStateChange(cb.name, prev, state)
 	}
@@ -367,6 +393,7 @@ func (cb *CircuitBreaker) toNewGeneration(now time.Time) {
 	var zero time.Time
 	switch cb.state {
 	case StateClosed:
+		// interval == 0 就是永远不清空 counts
 		if cb.interval == 0 {
 			cb.expiry = zero
 		} else {
